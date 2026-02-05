@@ -8,6 +8,7 @@ Flow:
 4. Answers are generated from the RAG chain (grounded in the PDF)
 """
 
+import time
 import tempfile
 from pathlib import Path
 
@@ -63,10 +64,26 @@ if prompt := st.chat_input("Ask a question about your PDF"):
             st.markdown(prompt)
 
         # Generate answer — LCEL chain returns a plain string
+        # Retry with backoff for free-tier rate limits (429 errors)
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 chain = build_rag_chain()
-                answer = chain.invoke(prompt)
+                answer = None
+                for attempt in range(5):
+                    try:
+                        answer = chain.invoke(prompt)
+                        break
+                    except Exception as e:
+                        if "429" in str(e) or "rate" in str(e).lower():
+                            delay = 15 * (2 ** attempt)
+                            st.warning(f"Rate limited — retrying in {delay}s...")
+                            time.sleep(delay)
+                        else:
+                            raise
+
+                if answer is None:
+                    answer = "⚠️ Rate limit exceeded. Please wait a minute and try again."
+
                 st.markdown(answer)
 
         st.session_state["messages"].append({"role": "assistant", "content": answer})

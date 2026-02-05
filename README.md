@@ -1,6 +1,6 @@
 # PDF Chat — RAG Q&A Chatbot
 
-A document Q&A chatbot built with LangChain, OpenRouter, and ChromaDB. Upload a PDF and ask questions — answers are grounded in your document using Retrieval Augmented Generation (RAG).
+A document Q&A chatbot built with LangChain, OpenRouter, and ChromaDB. Upload a PDF and ask questions — answers are grounded in your document using Retrieval Augmented Generation (RAG). Includes a full RAGAS evaluation pipeline to measure retrieval and generation quality.
 
 ## Demo
 
@@ -8,29 +8,40 @@ A document Q&A chatbot built with LangChain, OpenRouter, and ChromaDB. Upload a 
 
 Upload any PDF — research papers, contracts, reports, manuals — and ask questions in natural language. Answers are generated **only** from your document content, reducing hallucination.
 
+## RAGAS Evaluation Dashboard
+
+![Eval Dashboard](eval_dashboard.png)
+
+The built-in evaluation dashboard shows how well the RAG pipeline performs across 4 key metrics — faithfulness, answer relevancy, context precision, and context recall. Each metric is scored against a target threshold with pass/fail indicators. The grouped bar chart makes it easy to compare actual scores vs targets at a glance.
+
+![Eval Detail View](eval_detail.png)
+
+Drill into per-question results to debug weak spots — see the exact answer generated, the ground truth reference, the retrieved chunks that were used, and individual metric scores for each question.
+
 ## System Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                         STREAMLIT UI (app.py)                        │
-│  ┌────────────────────────┐    ┌──────────────────────────────────┐  │
-│  │     Sidebar            │    │         Chat Interface           │  │
-│  │  ┌──────────────────┐  │    │  ┌────────────┐                 │  │
-│  │  │  PDF File Upload  │  │    │  │ User Query │                 │  │
-│  │  └────────┬─────────┘  │    │  └─────┬──────┘                 │  │
-│  │           │             │    │        │                        │  │
-│  │  ┌────────▼─────────┐  │    │  ┌─────▼──────────────────────┐ │  │
-│  │  │ Ingestion Status │  │    │  │ Chat History + AI Response │ │  │
-│  │  └──────────────────┘  │    │  └────────────────────────────┘ │  │
-│  └────────────────────────┘    └──────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────┘
-         │                                    │
-         │ PDF bytes                          │ user question
-         ▼                                    ▼
-┌──────────────────┐                ┌──────────────────┐
-│  INGESTION       │                │  RAG CHAIN       │
-│  (ingest.py)     │                │  (chain.py)      │
-└──────────────────┘                └──────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                        STREAMLIT APP (multipage)                         │
+│                                                                          │
+│  ┌─────────────────────────────┐    ┌─────────────────────────────────┐  │
+│  │  Page 1: PDF Chat (app.py)  │    │  Page 2: Eval Dashboard         │  │
+│  │  ┌───────────┐ ┌──────────┐ │    │  (pages/eval_dashboard.py)      │  │
+│  │  │ PDF Upload│ │Chat UI   │ │    │  ┌───────────┐ ┌────────────┐  │  │
+│  │  │ (sidebar) │ │(Q&A)     │ │    │  │ Scorecard │ │ Bar Chart  │  │  │
+│  │  └─────┬─────┘ └────┬─────┘ │    │  └───────────┘ └────────────┘  │  │
+│  │        │             │       │    │  ┌──────────────────────────┐  │  │
+│  │        ▼             ▼       │    │  │ Per-Question Detail Table│  │  │
+│  │   ingest.py     chain.py     │    │  └──────────────────────────┘  │  │
+│  └─────────────────────────────┘    └─────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────────┘
+         │                │                          │
+         ▼                ▼                          ▼
+  ┌────────────┐   ┌────────────┐           ┌──────────────┐
+  │ HuggingFace│   │ OpenRouter │           │eval_results  │
+  │ Embeddings │   │ LLM (free) │           │   .json      │
+  │  (local)   │   │            │           │              │
+  └────────────┘   └────────────┘           └──────────────┘
 ```
 
 ## Data Ingestion Pipeline
@@ -53,7 +64,7 @@ Shows how a PDF is processed from raw file to searchable vectors.
   │  Each Document = { page_content, metadata: {page} }  │
   │                                                      │
   │  Input:  report.pdf (12 pages)                       │
-  │  Output: [Doc(page=0), Doc(page=1), ..., Doc(page=11)] │
+  │  Output: [Doc(page=0), Doc(page=1), ..., Doc(page=11)]│
   └────────────────────────┬─────────────────────────────┘
                            │
                            ▼
@@ -63,13 +74,6 @@ Shows how a PDF is processed from raw file to searchable vectors.
   │  Splits text into overlapping pieces for retrieval.  │
   │  Tries separators in order: "\n\n" → "\n" → " " → ""│
   │  to preserve paragraph/sentence boundaries.          │
-  │                                                      │
-  │  ┌────────────────────────────────────────────────┐  │
-  │  │  Why chunk?                                    │  │
-  │  │  - LLM context windows have token limits       │  │
-  │  │  - Smaller chunks = more precise retrieval     │  │
-  │  │  - Retrieval returns only relevant passages    │  │
-  │  └────────────────────────────────────────────────┘  │
   │                                                      │
   │  Config: chunk_size=1000, chunk_overlap=200          │
   │                                                      │
@@ -92,9 +96,10 @@ Shows how a PDF is processed from raw file to searchable vectors.
                            │
                            ▼
   ┌──────────────────────────────────────────────────────┐
-  │  3. EMBED — OpenAI text-embedding-3-small            │
+  │  3. EMBED — HuggingFace all-MiniLM-L6-v2 (local)    │
   │                                                      │
-  │  Converts each chunk into a 1536-dim float vector.   │
+  │  Converts each chunk into a 384-dim float vector.    │
+  │  Runs locally — no API calls, completely free.       │
   │  Semantically similar text → vectors close together. │
   │                                                      │
   │  "revenue growth of 15%"  → [0.023, -0.041, ...]    │
@@ -155,7 +160,6 @@ Shows what happens when a user asks a question.
   │  │  Chunk c_33: similarity = 0.87  ← MATCH       │  │
   │  │  Chunk c_1:  similarity = 0.85  ← MATCH       │  │
   │  │  Chunk c_45: similarity = 0.41  ← too low     │  │
-  │  │  ...                                           │  │
   │  └────────────────────────────────────────────────┘  │
   │                                                      │
   │  Returns: top 4 Document objects with page_content   │
@@ -183,121 +187,257 @@ Shows what happens when a user asks a question.
                            │
                            ▼
   ┌──────────────────────────────────────────────────────┐
-  │  4. LLM GENERATION — GPT-4o-mini (temperature=0)    │
+  │  4. LLM GENERATION — Gemma 3 27B via OpenRouter      │
   │                                                      │
   │  The model reads ONLY the provided chunks and        │
   │  generates a grounded answer. Temperature=0 makes    │
   │  output deterministic (same input → same output).    │
   │                                                      │
   │  Output: "Q3 revenue was $4.2M, a 15% increase..."  │
-  └────────────────────────┬─────────────────────────────┘
-                           │
-                           ▼
-  ┌──────────────────────────────────────────────────────┐
-  │  5. RESPONSE — Returned to Streamlit UI              │
-  │                                                      │
-  │  {                                                   │
-  │    "input": "What was Q3 revenue?",                  │
-  │    "context": [Doc, Doc, Doc, Doc],                  │
-  │    "answer": "Q3 revenue was $4.2M, a 15%..."       │
-  │  }                                                   │
   └──────────────────────────────────────────────────────┘
 ```
 
-## Evaluation Pipeline
+## RAGAS Evaluation Pipeline
 
-Shows how RAGAS measures the quality of the RAG system.
+The evaluation module measures how well the RAG system performs across 4 dimensions using the [RAGAS](https://docs.ragas.io/) framework. RAGAS uses an **LLM-as-Judge** pattern — a separate LLM call scores each metric by analyzing the question, answer, retrieved contexts, and ground truth.
+
+### Why Evaluate?
+
+RAG systems can fail silently — the app looks like it's working, but answers might be hallucinated, irrelevant, or missing key information. RAGAS catches these issues quantitatively:
+
+```
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                     WHY RAGAS EVALUATION?                       │
+  │                                                                 │
+  │  Without evaluation:                                            │
+  │  ┌───────────────────────────────────────────────────────────┐  │
+  │  │  Q: "What are the side effects?"                         │  │
+  │  │  A: "The main side effects include headaches and nausea" │  │
+  │  │                                                          │  │
+  │  │  Looks correct! But...                                   │  │
+  │  │  ❌ Answer includes "nausea" — NOT in retrieved context  │  │
+  │  │  ❌ Retrieved chunks were about dosage, not side effects │  │
+  │  │  ❌ Ground truth mentions 5 side effects, answer has 2   │  │
+  │  └───────────────────────────────────────────────────────────┘  │
+  │                                                                 │
+  │  With RAGAS:                                                    │
+  │  ┌───────────────────────────────────────────────────────────┐  │
+  │  │  Faithfulness:       0.50 ❌ (hallucinated "nausea")     │  │
+  │  │  Answer Relevancy:   0.85 ✅                              │  │
+  │  │  Context Precision:  0.25 ❌ (retrieved wrong chunks)    │  │
+  │  │  Context Recall:     0.40 ❌ (missed 3 of 5 facts)      │  │
+  │  └───────────────────────────────────────────────────────────┘  │
+  │                                                                 │
+  │  Now you know EXACTLY what to fix:                              │
+  │  → Improve retrieval (chunk size? embeddings? top-k?)           │
+  │  → Tighten the prompt to reduce hallucination                   │
+  └─────────────────────────────────────────────────────────────────┘
+```
+
+### Evaluation Flow
 
 ```
                     EVALUATION FLOW (eval.py)
 
   ┌──────────────────────────────────────────────────────┐
-  │  Test Set (defined by you)                           │
+  │  eval_dataset.json                                   │
   │                                                      │
   │  [                                                   │
-  │    { question: "...", ground_truth: "..." },         │
-  │    { question: "...", ground_truth: "..." },         │
+  │    { "question": "...", "ground_truth": "..." },     │
+  │    { "question": "...", "ground_truth": "..." },     │
+  │    ...                                               │
   │  ]                                                   │
   └────────────────────────┬─────────────────────────────┘
                            │
                            ▼
   ┌──────────────────────────────────────────────────────┐
-  │  Run each question through RAG chain                 │
-  │  Collect: question, answer, contexts, ground_truth   │
+  │  1. COLLECT RAG RESPONSES                            │
+  │                                                      │
+  │  For each question, run the full RAG chain and       │
+  │  capture BOTH the answer AND the retrieved contexts  │
+  │  in a single pass (via build_rag_chain_with_context) │
+  │                                                      │
+  │  Why single pass?                                    │
+  │  If we called retrieval and generation separately,   │
+  │  we might get different chunks — making evaluation   │
+  │  inaccurate. Single pass guarantees the contexts     │
+  │  scored are the EXACT ones used to generate.         │
+  │                                                      │
+  │  Output per question:                                │
+  │  {                                                   │
+  │    user_input: "What is the main topic?",            │
+  │    response: "The main topic is...",                 │
+  │    retrieved_contexts: ["chunk1", "chunk2", ...],    │
+  │    reference: "The document discusses..."            │
+  │  }                                                   │
   └────────────────────────┬─────────────────────────────┘
                            │
                            ▼
   ┌──────────────────────────────────────────────────────┐
-  │                    RAGAS METRICS                      │
+  │  2. BUILD RAGAS EVALUATION DATASET                   │
+  │                                                      │
+  │  Convert collected responses into RAGAS v0.4 format: │
+  │  EvaluationDataset of SingleTurnSample objects       │
+  │                                                      │
+  │  Each sample contains:                               │
+  │  - user_input       (the question)                   │
+  │  - response         (LLM's answer)                   │
+  │  - retrieved_contexts (chunks used)                  │
+  │  - reference        (ground truth)                   │
+  └────────────────────────┬─────────────────────────────┘
+                           │
+                           ▼
+  ┌──────────────────────────────────────────────────────┐
+  │  3. RAGAS EVALUATE — LLM-as-Judge                    │
+  │                                                      │
+  │  RAGAS uses a separate LLM call to score each metric │
+  │  The evaluator LLM reads the question, answer, and   │
+  │  contexts, then judges quality on each dimension.    │
+  │                                                      │
+  │  Evaluator: Gemma 3 27B (free, via OpenRouter)       │
+  │  Embeddings: all-MiniLM-L6-v2 (local, for relevancy)│
   │                                                      │
   │  ┌────────────────────────────────────────────────┐  │
-  │  │  Faithfulness (0.0 → 1.0)                      │  │
-  │  │  Can every claim in the answer be traced back  │  │
-  │  │  to the retrieved context?                     │  │
+  │  │  For each (question, answer, contexts):        │  │
   │  │                                                │  │
-  │  │  Answer: "Revenue grew 15%"                    │  │
-  │  │  Context contains: "revenue growth of 15%"     │  │
-  │  │  Score: 1.0 (fully grounded)                   │  │
-  │  │                                                │  │
-  │  │  Answer: "Revenue grew 15%, led by CEO Smith"  │  │
-  │  │  Context: no mention of CEO Smith              │  │
-  │  │  Score: 0.5 (partially hallucinated)           │  │
+  │  │  Faithfulness:       LLM checks each claim     │  │
+  │  │  Answer Relevancy:   LLM + embeddings compare  │  │
+  │  │  Context Precision:  LLM judges chunk relevance│  │
+  │  │  Context Recall:     LLM checks fact coverage  │  │
+  │  └────────────────────────────────────────────────┘  │
+  │                                                      │
+  │  Rate limit handling:                                │
+  │  Free tier = 20 req/min, 50 req/day                 │
+  │  Built-in exponential backoff retries automatically  │
+  └────────────────────────┬─────────────────────────────┘
+                           │
+                           ▼
+  ┌──────────────────────────────────────────────────────┐
+  │  4. OUTPUT — eval_results.json                       │
+  │                                                      │
+  │  {                                                   │
+  │    "metadata": { timestamp, models, num_questions }, │
+  │    "targets": { faithfulness: 0.8, ... },            │
+  │    "aggregate_scores": { faithfulness: 0.92, ... },  │
+  │    "per_question": [                                 │
+  │      { question, answer, contexts, scores: {...} }   │
+  │    ]                                                 │
+  │  }                                                   │
+  └────────────────────────┬─────────────────────────────┘
+                           │
+                           ▼
+  ┌──────────────────────────────────────────────────────┐
+  │  5. DASHBOARD — pages/eval_dashboard.py              │
+  │                                                      │
+  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐  │
+  │  │Faith: 0.9│ │Relev: 0.8│ │Prec: 0.8 │ │Rec: 0.7│  │
+  │  │  PASS ✓  │ │  PASS ✓  │ │  PASS ✓  │ │ PASS ✓ │  │
+  │  └──────────┘ └──────────┘ └──────────┘ └────────┘  │
+  │                                                      │
+  │  ┌────────────────────────────────────────────────┐  │
+  │  │  Grouped Bar Chart: Score vs Target (Altair)  │  │
+  │  │  Blue = actual score, Red = target threshold   │  │
   │  └────────────────────────────────────────────────┘  │
   │                                                      │
   │  ┌────────────────────────────────────────────────┐  │
-  │  │  Answer Relevancy (0.0 → 1.0)                  │  │
-  │  │  Does the answer actually address the          │  │
-  │  │  question that was asked?                      │  │
-  │  │                                                │  │
-  │  │  Q: "What was Q3 revenue?"                     │  │
-  │  │  A: "Q3 revenue was $4.2M" → Score: 1.0       │  │
-  │  │  A: "The company was founded in 2010" → 0.0   │  │
-  │  └────────────────────────────────────────────────┘  │
-  │                                                      │
-  │  ┌────────────────────────────────────────────────┐  │
-  │  │  Context Precision (0.0 → 1.0)                 │  │
-  │  │  Are the retrieved chunks actually relevant     │  │
-  │  │  to the question? (no noise)                   │  │
-  │  │                                                │  │
-  │  │  Q: "What was Q3 revenue?"                     │  │
-  │  │  Retrieved: [Q3 financials, Q3 revenue table,  │  │
-  │  │   company history, employee bios]              │  │
-  │  │  Score: 0.5 (2 of 4 chunks were relevant)     │  │
-  │  └────────────────────────────────────────────────┘  │
-  │                                                      │
-  │  ┌────────────────────────────────────────────────┐  │
-  │  │  Context Recall (0.0 → 1.0)                    │  │
-  │  │  Did we retrieve ALL the chunks needed to      │  │
-  │  │  fully answer the question?                    │  │
-  │  │  (Compared against ground_truth answer)        │  │
-  │  │                                                │  │
-  │  │  Ground truth mentions 3 facts                 │  │
-  │  │  Retrieved context covers 2 of 3              │  │
-  │  │  Score: 0.67                                   │  │
+  │  │  Per-Question Table + Expandable Detail View   │  │
+  │  │  (see exact chunks, reference, scores per Q)   │  │
   │  └────────────────────────────────────────────────┘  │
   └──────────────────────────────────────────────────────┘
 ```
 
-## End-to-End Data Flow
-
-Complete picture from PDF upload to answer delivery.
+### What Each Metric Measures
 
 ```
-┌─────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
-│  USER    │   │ STREAMLIT│   │ INGEST   │   │ CHROMA   │   │  OPENAI  │
-│          │   │ (app.py) │   │          │   │ (Vector  │   │  API     │
-│          │   │          │   │          │   │  Store)  │   │          │
-└────┬─────┘   └────┬─────┘   └────┬─────┘   └────┬─────┘   └────┬─────┘
+  ┌────────────────────────────────────────────────────────────────────┐
+  │                         RAGAS METRICS                              │
+  │                                                                    │
+  │  ┌──────────────────────────────────────────────────────────────┐  │
+  │  │  FAITHFULNESS (target > 0.8)                                 │  │
+  │  │  "Is the answer grounded in the retrieved context?"          │  │
+  │  │                                                              │  │
+  │  │  How it works:                                               │  │
+  │  │  1. LLM extracts individual claims from the answer          │  │
+  │  │  2. For each claim, LLM checks: "Is this in the context?"  │  │
+  │  │  3. Score = supported claims / total claims                 │  │
+  │  │                                                              │  │
+  │  │  Score 1.0 → every claim is backed by context (no halluc.) │  │
+  │  │  Score 0.5 → half the claims are made up                   │  │
+  │  └──────────────────────────────────────────────────────────────┘  │
+  │                                                                    │
+  │  ┌──────────────────────────────────────────────────────────────┐  │
+  │  │  ANSWER RELEVANCY (target > 0.8)                             │  │
+  │  │  "Does the answer actually address the question?"            │  │
+  │  │                                                              │  │
+  │  │  How it works:                                               │  │
+  │  │  1. LLM generates N questions from the answer               │  │
+  │  │  2. Embedding model computes similarity to original Q       │  │
+  │  │  3. Score = average cosine similarity                       │  │
+  │  │                                                              │  │
+  │  │  Score 1.0 → answer perfectly addresses the question        │  │
+  │  │  Score 0.2 → answer is off-topic                            │  │
+  │  └──────────────────────────────────────────────────────────────┘  │
+  │                                                                    │
+  │  ┌──────────────────────────────────────────────────────────────┐  │
+  │  │  CONTEXT PRECISION (target > 0.7)                            │  │
+  │  │  "Are the retrieved chunks actually relevant? (signal:noise)"│  │
+  │  │                                                              │  │
+  │  │  How it works:                                               │  │
+  │  │  1. LLM checks each retrieved chunk against the question    │  │
+  │  │  2. Relevant chunks ranked higher = better precision        │  │
+  │  │  3. Score = weighted relevance (top-ranked chunks matter)   │  │
+  │  │                                                              │  │
+  │  │  Score 1.0 → all retrieved chunks are relevant              │  │
+  │  │  Score 0.25 → only 1 of 4 chunks was useful                │  │
+  │  └──────────────────────────────────────────────────────────────┘  │
+  │                                                                    │
+  │  ┌──────────────────────────────────────────────────────────────┐  │
+  │  │  CONTEXT RECALL (target > 0.7)                               │  │
+  │  │  "Did retrieval find ALL the info needed to answer?"         │  │
+  │  │                                                              │  │
+  │  │  How it works:                                               │  │
+  │  │  1. LLM extracts claims from the ground truth               │  │
+  │  │  2. For each claim, checks: "Is this in the contexts?"     │  │
+  │  │  3. Score = covered claims / total claims                   │  │
+  │  │                                                              │  │
+  │  │  Score 1.0 → contexts contain everything needed             │  │
+  │  │  Score 0.5 → half the key info was not retrieved            │  │
+  │  └──────────────────────────────────────────────────────────────┘  │
+  └────────────────────────────────────────────────────────────────────┘
+```
+
+### How to Run Evaluation
+
+```bash
+# 1. Make sure you've already ingested a PDF via the app
+
+# 2. Edit eval_dataset.json with questions specific to your PDF
+#    Each entry needs a question and ground_truth answer
+
+# 3. Run the evaluation (takes a few minutes with free tier)
+python eval.py
+
+# 4. View results in the dashboard
+streamlit run app.py
+# Navigate to "📊 RAG Evaluation" in the sidebar
+```
+
+## End-to-End Data Flow
+
+Complete picture from PDF upload through evaluation.
+
+```
+┌─────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+│  USER    │  │ STREAMLIT│  │ INGEST   │  │ CHROMA   │  │OPENROUTER│
+│          │  │ (app.py) │  │          │  │ (Vector  │  │ LLM API  │
+│          │  │          │  │          │  │  Store)  │  │  (free)  │
+└────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘
      │              │              │              │              │
      │ Upload PDF   │              │              │              │
      │─────────────▶│              │              │              │
      │              │ ingest_pdf() │              │              │
      │              │─────────────▶│              │              │
-     │              │              │  embed chunks│              │
-     │              │              │──────────────┼─────────────▶│
-     │              │              │              │    vectors   │
-     │              │              │◀─────────────┼──────────────│
-     │              │              │ store vectors│              │
+     │              │              │ embed(local) │              │
      │              │              │─────────────▶│              │
      │              │    done      │              │              │
      │              │◀─────────────│              │              │
@@ -306,10 +446,6 @@ Complete picture from PDF upload to answer delivery.
      │              │              │              │              │
      │ Ask question │              │              │              │
      │─────────────▶│              │              │              │
-     │              │        embed query          │              │
-     │              │─────────────────────────────┼─────────────▶│
-     │              │              │              │  query vector│
-     │              │◀─────────────────────────────┼──────────────│
      │              │     similarity search        │              │
      │              │─────────────────────────────▶│              │
      │              │         top-k chunks         │              │
@@ -321,19 +457,46 @@ Complete picture from PDF upload to answer delivery.
      │   Answer     │              │              │              │
      │◀─────────────│              │              │              │
      │              │              │              │              │
+
+         EVALUATION PHASE (python eval.py)
+
+┌─────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+│EVAL DATA│  │ eval.py  │  │ RAG CHAIN│  │  RAGAS   │  │OPENROUTER│
+│  .json  │  │          │  │          │  │ EVALUATE │  │(evaluator│
+│          │  │          │  │          │  │          │  │  judge)  │
+└────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘
+     │              │              │              │              │
+     │ load Q&A     │              │              │              │
+     │─────────────▶│              │              │              │
+     │              │ ask(question)│              │              │
+     │              │─────────────▶│              │              │
+     │              │  answer +    │              │              │
+     │              │  contexts    │              │              │
+     │              │◀─────────────│              │              │
+     │              │         evaluate(dataset)   │              │
+     │              │────────────────────────────▶│              │
+     │              │              │              │ judge quality│
+     │              │              │              │─────────────▶│
+     │              │              │              │   scores     │
+     │              │              │              │◀─────────────│
+     │              │     scores + per-question   │              │
+     │              │◀────────────────────────────│              │
+     │              │                             │              │
+     │              │──▶ eval_results.json         │              │
+     │              │──▶ console summary           │              │
 ```
 
 ## Quick Start
 
 ```bash
 # Clone and install
-git clone https://github.com/YOUR_USERNAME/rag-chatbot.git
+git clone https://github.com/edsonleung/rag-chatbot.git
 cd rag-chatbot
 pip install -r requirements.txt
 
-# Set your OpenAI API key
+# Set your OpenRouter API key (free)
 cp .env.example .env
-# Edit .env with your key
+# Edit .env with your key from https://openrouter.ai/settings/keys
 
 # Run the app
 streamlit run app.py
@@ -342,45 +505,45 @@ streamlit run app.py
 ## Project Structure
 
 ```
-├── app.py           # Streamlit chat UI
-├── ingest.py        # PDF loading, chunking, embedding pipeline
-├── retriever.py     # Vector store search interface
-├── chain.py         # LangChain RAG chain (retriever + LLM)
-├── eval.py          # RAGAS evaluation (faithfulness, relevancy)
+├── app.py                      # Streamlit chat UI (main page)
+├── pages/
+│   └── eval_dashboard.py       # RAGAS evaluation dashboard (page 2)
+├── ingest.py                   # PDF loading, chunking, embedding pipeline
+├── retriever.py                # Vector store search interface
+├── chain.py                    # LangChain RAG chain (retriever + LLM)
+├── eval.py                     # RAGAS evaluation module
+├── eval_dataset.json           # Sample evaluation questions
 ├── requirements.txt
-└── .env.example
-```
-
-## Evaluation
-
-Uses [RAGAS](https://docs.ragas.io/) to measure RAG quality:
-
-| Metric | What it measures |
-|---|---|
-| Faithfulness | Is the answer supported by retrieved context? |
-| Answer Relevancy | Does the answer address the question? |
-| Context Precision | Are retrieved chunks relevant? |
-| Context Recall | Did we retrieve all needed context? |
-
-```bash
-# Edit test questions in eval.py, then:
-python eval.py
+├── .env.example
+├── demo.png                    # Chat app screenshot
+├── eval_dashboard.png          # Evaluation dashboard screenshot
+└── eval_detail.png             # Evaluation detail view screenshot
 ```
 
 ## Tech Stack
 
-- **LangChain** — Orchestration (chains, prompts, document loaders)
-- **OpenAI** — Embeddings (`text-embedding-3-small`) + LLM (`gpt-4o-mini`)
+- **LangChain** — Orchestration (LCEL chains, prompts, document loaders)
+- **OpenRouter** — Free LLM access (Google Gemma 3 27B Instruct)
+- **HuggingFace** — Local embeddings (`all-MiniLM-L6-v2`, no API needed)
 - **ChromaDB** — Local vector database
-- **Streamlit** — Web UI
-- **RAGAS** — RAG evaluation framework
+- **Streamlit** — Multipage web UI
+- **RAGAS** — RAG evaluation framework (v0.4, LLM-as-Judge)
+- **Altair** — Data visualization for evaluation charts
 
 ## Key Design Decisions
 
-- **Chunk size 1000 / overlap 200**: Balances retrieval precision with sufficient context per chunk
-- **RecursiveCharacterTextSplitter**: Preserves paragraph/sentence boundaries vs naive splitting
-- **Temperature 0**: Deterministic outputs for factual Q&A
-- **Top-k=4 retrieval**: Enough context without flooding the prompt
+| Decision | Rationale |
+|---|---|
+| **Chunk size 1000 / overlap 200** | Balances retrieval precision with sufficient context per chunk |
+| **RecursiveCharacterTextSplitter** | Preserves paragraph/sentence boundaries vs naive splitting |
+| **Temperature 0** | Deterministic outputs for factual Q&A |
+| **Top-k=4 retrieval** | Enough context without flooding the prompt |
+| **Local embeddings** | Free, fast, no API dependency for embeddings |
+| **OpenRouter free tier** | Zero-cost LLM access for both RAG and evaluation |
+| **LCEL pipe operator** | Modern LangChain chain composition (`retriever \| prompt \| llm`) |
+| **Single-pass eval** | `build_rag_chain_with_context()` captures answer + contexts together |
+| **Separate eval model** | Uses a different model for judging to spread rate limits |
+| **Exponential backoff** | Handles free-tier rate limits automatically (429 retries) |
 
 ## License
 

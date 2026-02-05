@@ -41,7 +41,7 @@ def _format_docs(docs: list) -> str:
 
 
 def build_rag_chain(
-    model: str = "meta-llama/llama-3.3-70b-instruct:free",
+    model: str = "google/gemma-3-27b-it:free",
     temperature: float = 0.0,
 ):
     """
@@ -85,7 +85,64 @@ def build_rag_chain(
     return chain
 
 
+def build_rag_chain_with_context(
+    model: str = "google/gemma-3-27b-it:free",
+    temperature: float = 0.0,
+):
+    """
+    Build a RAG chain that returns BOTH the answer and retrieved contexts.
+
+    Used by the evaluation module — RAGAS needs the exact chunks that
+    produced an answer to measure faithfulness and context quality.
+
+    Returns a chain that outputs:
+        {"answer": str, "contexts": list[str], "input": str}
+    """
+    llm = ChatOpenAI(
+        model=model,
+        temperature=temperature,
+        openai_api_key=os.getenv("OPENROUTER_API_KEY"),
+        openai_api_base=OPENROUTER_BASE_URL,
+    )
+    retriever = get_retriever()
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", SYSTEM_PROMPT),
+        ("human", "{input}"),
+    ])
+
+    def _retrieve_and_format(question: str) -> dict:
+        """Retrieve docs once, return both formatted context and raw chunks."""
+        docs = retriever.invoke(question)
+        return {
+            "context": _format_docs(docs),
+            "contexts_list": [doc.page_content for doc in docs],
+        }
+
+    def _full_chain(question: str) -> dict:
+        """Run retrieval + generation, return answer + contexts."""
+        retrieved = _retrieve_and_format(question)
+        answer_chain = prompt | llm | StrOutputParser()
+        answer = answer_chain.invoke({
+            "context": retrieved["context"],
+            "input": question,
+        })
+        return {
+            "input": question,
+            "answer": answer,
+            "contexts": retrieved["contexts_list"],
+        }
+
+    return _full_chain
+
+
 def ask(question: str) -> str:
     """Ask a question and return the answer string."""
     chain = build_rag_chain()
     return chain.invoke(question)
+
+
+def ask_with_context(question: str) -> dict:
+    """Ask a question and return answer + retrieved contexts for evaluation."""
+    chain_fn = build_rag_chain_with_context()
+    return chain_fn(question)

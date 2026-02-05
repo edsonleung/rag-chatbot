@@ -1,0 +1,14 @@
+[
+  {
+    "question": "What is tilt in the context of trading?",
+    "ground_truth": "Tilt is a deviation from one's optimal performance due to emotional or psychological factors."
+  },
+  {
+    "question": "Why is self-awareness important in trading?",
+    "ground_truth": "Self-awareness is important because understanding your own behavior, emotions, and thought processes helps you make better decisions and avoid costly mistakes."
+  },
+  {
+    "question": "What techniques can help combat tilt?",
+    "ground_truth": "Techniques include meditation, breathing exercises, journaling, and creating a system where your strong self protects against impulsive decisions."
+  }
+]
